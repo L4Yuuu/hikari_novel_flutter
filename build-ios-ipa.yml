@@ -1,0 +1,82 @@
+name: Build unsigned iOS IPA
+
+# 手动触发（Actions 页面点 Run workflow），或推送到 main/develop 时自动构建
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  build-ipa:
+    # macOS 运行器：GitHub 公共仓库完全免费、不限时长
+    # Xcode 版本更全的备选：macos-26 / macos-26-arm64
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          # 作者开发环境为 3.47.4；若该版本不可用会自动回退，可改成 channel: stable
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+
+      - name: Show toolchain
+        run: flutter doctor -v
+
+      # --- 可选：提高 iOS 部署目标 ---
+      # 工程默认是 13.0，Xcode 26 对低版本部署目标支持不稳定，抬到 16.0 更稳。
+      # 对 iPadOS 27 设备没有任何影响（只会提高最低要求）。
+      # 如果构建时报部署目标相关错误，这段就是解药；如果不需要可整段删掉。
+      - name: Raise iOS deployment target to 16.0
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+
+          pbx = pathlib.Path('ios/Runner.xcodeproj/project.pbxproj')
+          s = pbx.read_text(encoding='utf-8')
+          s, n = re.subn(r'IPHONEOS_DEPLOYMENT_TARGET = [\d.]+;',
+                         'IPHONEOS_DEPLOYMENT_TARGET = 16.0;', s)
+          pbx.write_text(s, encoding='utf-8')
+          print(f'project.pbxproj: patched {n} occurrence(s)')
+
+          plist = pathlib.Path('ios/Flutter/AppFrameworkInfo.plist')
+          t = plist.read_text(encoding='utf-8')
+          t, m = re.subn(r'(<key>MinimumOSVersion</key>\s*<string>)[\d.]+(</string>)',
+                         r'\g<1>16.0\g<2>', t)
+          plist.write_text(t, encoding='utf-8')
+          print(f'AppFrameworkInfo.plist: patched {m} occurrence(s)')
+          PY
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build iOS (release, unsigned)
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned .ipa
+        run: |
+          set -euo pipefail
+          APP="build/ios/iphoneos/Runner.app"
+          test -d "$APP" || { echo "::error::$APP not found"; exit 1; }
+          rm -rf Payload HikariNovel-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/Runner.app
+          zip -qry HikariNovel-unsigned.ipa Payload
+          rm -rf Payload
+          ls -lh HikariNovel-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HikariNovel-unsigned-ipa
+          path: HikariNovel-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
